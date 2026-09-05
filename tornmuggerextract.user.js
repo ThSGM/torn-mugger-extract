@@ -10,8 +10,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @connect      ffscouter.com
-// @updateURL    https://raw.githubusercontent.com/ThSGM/torn-mugger-extract/main/torn-mugger-extract.user.js
-// @downloadURL  https://raw.githubusercontent.com/ThSGM/torn-mugger-extract/main/torn-mugger-extract.user.js
+// @updateURL    https://raw.githubusercontent.com/ThSGM/torn-mugger-extract/main/tornmuggerextract.user.js
+// @downloadURL  https://raw.githubusercontent.com/ThSGM/torn-mugger-extract/main/tornmuggerextract.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
