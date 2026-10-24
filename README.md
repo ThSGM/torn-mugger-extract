@@ -38,7 +38,12 @@ YATA export: the YATA export also puts the battlestats and mug amounts into the 
    (the panel will offer a shortcut button if you're on the wrong page).
 2. Scroll to however far back you want, then click **1. Scrape visible**.
 3. Optionally enter an [FFScouter](https://ffscouter.com) API key and click
-   **2. Fetch FFScout stats** to attach battlestat estimates.
+   **2. Fetch FFScouter stats** to attach battlestat estimates and fair fight
+   (FF) scores.
+   Set the **Fair fight range** (default 0 – 1.5): all exports below skip
+   attackers whose FF score falls outside it. Attackers with no known FF
+   (stats not fetched / not on FFScouter) are kept. Leave a box empty for no
+   bound on that side.
 4. Export:
    - **Download sortable table (HTML)** — a standalone page you can open and
      click column headers to sort.
@@ -48,3 +53,6 @@ YATA export: the YATA export also puts the battlestats and mug amounts into the 
 
 Anonymous ("Someone anonymously mugged you") entries can't be attacked back,
 so they're excluded from the table and only shown as a count/total tally.
+
+Click the **−** in the panel header to collapse it out of the way (**+** to
+expand); the state is remembered between page loads.

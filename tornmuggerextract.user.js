@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mugger Extractor
 // @namespace    torn-mugger-extract
-// @version      1.2
+// @version      1.3
 // @description  Extract names/IDs of everyone who mugged/attacked you from the Torn activity log.
 // @author       a1ry [3583932]
 // @match        https://www.torn.com/*
@@ -40,6 +40,8 @@
   const FFSCOUT_URL = 'https://ffscouter.com/api/v1/get-stats';
   const FFSCOUT_CHUNK = 100; // targets per request, kept conservative
   const DEFAULT_MAX_AGE_DAYS = 7;
+  const DEFAULT_FF_MIN = 0;
+  const DEFAULT_FF_MAX = 1.5;
 
   // Per-row abbreviated time, e.g. "6d", "22d", "1mo" — checked against the
   // START of an ancestor's full text (the row wraps the icon + sentence).
@@ -224,11 +226,11 @@
   }
 
   // Mirrors the filtering logic of the existing Python fetch_ffscout(): a
-  // flat JSON list of {player_id, bs_estimate, last_updated}, entries older
+  // flat JSON list of {player_id, fair_fight, bs_estimate, last_updated}, entries older
   // than maxAgeDays are kept but flagged stale rather than dropped, so the
   // CSV shows what happened instead of silently omitting rows.
   async function fetchFFScoutStats(ids, apiKey, maxAgeDays, onProgress) {
-    const statsMap = new Map(); // id -> { bsEstimate, ageDays, stale }
+    const statsMap = new Map(); // id -> { bsEstimate, fairFight, ageDays, stale }
     const uniqueIds = Array.from(new Set(ids));
     for (let i = 0; i < uniqueIds.length; i += FFSCOUT_CHUNK) {
       const chunk = uniqueIds.slice(i, i + FFSCOUT_CHUNK);
@@ -250,10 +252,11 @@
       if (!Array.isArray(data)) continue;
       const now = Date.now() / 1000;
       data.forEach((u) => {
-        if (u.bs_estimate == null) return;
+        if (u.bs_estimate == null && u.fair_fight == null) return;
         const ageDays = (now - (u.last_updated || 0)) / 86400;
         statsMap.set(String(u.player_id), {
-          bsEstimate: u.bs_estimate,
+          bsEstimate: u.bs_estimate ?? null,
+          fairFight: u.fair_fight ?? null,
           ageDays: Math.round(ageDays * 10) / 10,
           stale: maxAgeDays != null && ageDays > maxAgeDays,
         });
@@ -268,10 +271,32 @@
     [...result.named, ...result.events].forEach((r) => {
       const s = statsMap.get(String(r.id));
       r.bsEstimate = s ? s.bsEstimate : null;
+      r.fairFight = s ? s.fairFight : null;
       r.statAgeDays = s ? s.ageDays : null;
       r.statStale = s ? s.stale : null;
     });
     return result;
+  }
+
+  // ---- fair fight filter ----------------------------------------------
+
+  // Drops named attackers (and their events) whose FFScouter fair fight
+  // score lies outside [min, max]. Anyone without a known FF score (stats
+  // not fetched, or not in FFScouter) is kept — we can't judge them, so
+  // they're not silently hidden. Anonymous entries are untouched.
+  function filterByFairFight(result, min, max) {
+    const inRange = (r) =>
+      r.fairFight == null ||
+      ((min == null || r.fairFight >= min) && (max == null || r.fairFight <= max));
+    const named = result.named.filter(inRange);
+    const keepIds = new Set(named.map((r) => r.id));
+    const events = result.events.filter((e) => keepIds.has(e.id));
+    return {
+      ...result,
+      events,
+      named,
+      filteredOut: result.named.length - named.length,
+    };
   }
 
   // ---- export helpers -------------------------------------------------
@@ -297,6 +322,24 @@
     }[c]));
   }
 
+  // YATA-style breakdown, e.g. 5,015,234,000 -> "5b 15m 234,000" — each
+  // magnitude split out (trillions/billions/millions), remainder comma-grouped.
+  function formatBattlestatBreakdown(n) {
+    if (n == null) return '';
+    let remaining = Math.round(Number(n));
+    const units = [{ suffix: 't', value: 1e12 }, { suffix: 'b', value: 1e9 }, { suffix: 'm', value: 1e6 }];
+    const parts = [];
+    units.forEach((u) => {
+      const count = Math.floor(remaining / u.value);
+      if (count > 0) {
+        parts.push(count + u.suffix);
+        remaining -= count * u.value;
+      }
+    });
+    if (remaining > 0 || parts.length === 0) parts.push(remaining.toLocaleString());
+    return parts.join(' ');
+  }
+
   const HTML_COLS = [
     { key: 'name', label: 'Name', type: 'string' },
     { key: 'id', label: 'ID', type: 'number' },
@@ -307,7 +350,8 @@
     { key: 'logUrl', label: 'Attack Log', type: 'string', isLink: true, linkText: 'Log' },
     { key: 'daysAgo', label: 'Days Since Attack', type: 'number' },
     { key: 'estimatedDate', label: 'Estimated Date', type: 'string' },
-    { key: 'bsEstimate', label: 'FFS BS Estimate', type: 'number' },
+    { key: 'bsEstimate', label: 'FFS BS Estimate', type: 'number', isFormattedNumber: true },
+    { key: 'fairFight', label: 'FFS Fair Fight', type: 'number' },
     { key: 'statAgeDays', label: 'FFS Stat Age (d)', type: 'number' },
     { key: 'statStale', label: 'FFS Stale', type: 'string' },
   ];
@@ -333,6 +377,12 @@
           sortVal = raw ? '1' : '0';
         } else if (c.isMoney) {
           display = raw != null ? '$' + Number(raw).toLocaleString() : '';
+          sortVal = raw == null ? '' : String(raw);
+        } else if (c.isFormattedNumber) {
+          // YATA-style breakdown (e.g. "5b 15m 234,000") for readability,
+          // but data-sort keeps the raw numeric value so ordering stays
+          // numeric, not alphabetical on the formatted string.
+          display = raw != null ? formatBattlestatBreakdown(raw) : '';
           sortVal = raw == null ? '' : String(raw);
         } else {
           display = raw == null ? '' : escapeHtml(String(raw));
@@ -488,6 +538,7 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
       const note = `BS: ${bsNote} | Stolen: ${stolen} (${r.count} mug${r.count === 1 ? '' : 's'})`;
 
       const entryValues = { ...YATA_DEFAULTS, name: r.name, note };
+      if (r.fairFight != null) entryValues.fair_fight = r.fairFight;
       const ordered = {};
       YATA_FIELD_ORDER.forEach((k) => { ordered[k] = entryValues[k]; });
       data[String(r.id)] = ordered;
@@ -514,6 +565,14 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
       #tme-panel input {
         background: #111; color: #eee; border: 1px solid #555; padding: 4px;
       }
+      #tme-panel #tme-collapse {
+        width: auto; margin: 0; padding: 0 6px; background: transparent;
+        color: #eee; font-size: 14px; line-height: 1;
+      }
+      #tme-panel #tme-collapse:hover { background: #333; }
+      #tme-panel.tme-collapsed { width: auto; }
+      #tme-panel.tme-collapsed #tme-body { display: none; }
+      #tme-panel.tme-collapsed #tme-header { margin-bottom: 0; }
     `;
     document.head.appendChild(style);
 
@@ -526,7 +585,11 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
       width: 240px;
     `;
     panel.innerHTML = `
-      <div style="font-weight:bold; margin-bottom:6px;">Mugger Extractor</div>
+      <div id="tme-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px;">
+        <span style="font-weight:bold;">Mugger Extractor</span>
+        <button id="tme-collapse" title="Collapse / expand">&minus;</button>
+      </div>
+      <div id="tme-body">
       <div id="tme-nav-warning" style="display:none; margin-bottom:8px; padding:8px; background:#7c2d12; border-radius:4px;">
         You're not on the Attack/Mug log page.
         <button id="tme-nav-btn" style="margin-top:6px; background:#f97316;">Go to Attack &amp; Mug Log</button>
@@ -535,14 +598,20 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
       <div id="tme-status" style="margin:6px 0; opacity:.8;"></div>
       <hr style="border-color:#444; margin:8px 0;">
       <div style="font-weight:bold; margin-bottom:4px;">2. FFScouter stats (optional)</div>
-      <input id="tme-ffs-key" type="password" placeholder="FFScouter API key"
+      <input id="tme-ffs-key" type="password" placeholder="Enter API key used by FFScouter"
         style="width:100%; box-sizing:border-box; margin-bottom:4px;">
       <div style="display:flex; align-items:center; gap:4px; margin-bottom:6px;">
         <label for="tme-ffs-age" style="flex:1;">Max age (days)</label>
         <input id="tme-ffs-age" type="number" min="0" step="1" style="width:50px;">
       </div>
-      <button id="tme-ffs-fetch" disabled>2. Fetch FFScout stats</button>
+      <button id="tme-ffs-fetch" disabled>2. Fetch FFScouter stats</button>
       <div id="tme-ffs-status" style="margin:2px 0 4px; opacity:.8;"></div>
+      <div style="display:flex; align-items:center; gap:4px; margin-bottom:4px;">
+        <label style="flex:1;" title="Exports skip attackers whose fair fight score is outside this range (unknown FF is kept)">Fair fight range</label>
+        <input id="tme-ff-min" type="number" min="0" step="0.1" placeholder="min" style="width:45px;">
+        <span>&ndash;</span>
+        <input id="tme-ff-max" type="number" min="0" step="0.1" placeholder="max" style="width:45px;">
+      </div>
       <hr style="border-color:#444; margin:8px 0;">
       <button id="tme-html" disabled>3. Download sortable table (HTML)</button>
       <button id="tme-yata" disabled>3. Download YATA JSON</button>
@@ -552,6 +621,8 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
         Manually scroll to the bottom (or where desired) of your "Attack mug receive" log screen.
         Press to scrape. Can add FFScouter API code to retrieve estimated stats.
         Output to HTML to get a website to attack or JSON to import into yata.yt targets list.
+        Exports only include attackers within the fair fight range (once stats are fetched).
+      </div>
       </div>
     `;
     document.body.appendChild(panel);
@@ -563,6 +634,15 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
       window.location.href = TARGET_LOG_URL;
     });
 
+    const collapseBtn = panel.querySelector('#tme-collapse');
+    function setCollapsed(collapsed) {
+      panel.classList.toggle('tme-collapsed', collapsed);
+      collapseBtn.innerHTML = collapsed ? '+' : '&minus;';
+      GM_setValue('panel_collapsed', collapsed);
+    }
+    setCollapsed(GM_getValue('panel_collapsed', false));
+    collapseBtn.addEventListener('click', () => setCollapsed(!panel.classList.contains('tme-collapsed')));
+
     let lastResult = null;
     const status = panel.querySelector('#tme-status');
     const htmlBtn = panel.querySelector('#tme-html');
@@ -572,6 +652,8 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
     const ffsAgeInput = panel.querySelector('#tme-ffs-age');
     const ffsFetchBtn = panel.querySelector('#tme-ffs-fetch');
     const ffsStatus = panel.querySelector('#tme-ffs-status');
+    const ffMinInput = panel.querySelector('#tme-ff-min');
+    const ffMaxInput = panel.querySelector('#tme-ff-max');
 
     // persist the key/max-age locally (per-browser, via the userscript
     // manager's own storage) so you don't have to retype them every visit
@@ -579,6 +661,22 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
     ffsAgeInput.value = GM_getValue('ffs_max_age_days', DEFAULT_MAX_AGE_DAYS);
     ffsKeyInput.addEventListener('change', () => GM_setValue('ffs_api_key', ffsKeyInput.value.trim()));
     ffsAgeInput.addEventListener('change', () => GM_setValue('ffs_max_age_days', ffsAgeInput.value));
+    ffMinInput.value = GM_getValue('ff_min', DEFAULT_FF_MIN);
+    ffMaxInput.value = GM_getValue('ff_max', DEFAULT_FF_MAX);
+    ffMinInput.addEventListener('change', () => GM_setValue('ff_min', ffMinInput.value));
+    ffMaxInput.addEventListener('change', () => GM_setValue('ff_max', ffMaxInput.value));
+
+    // The result as it should be exported: lastResult with attackers
+    // outside the fair fight range removed. An empty box means no bound.
+    function exportResult() {
+      const min = ffMinInput.value === '' ? null : parseFloat(ffMinInput.value);
+      const max = ffMaxInput.value === '' ? null : parseFloat(ffMaxInput.value);
+      return filterByFairFight(lastResult, min, max);
+    }
+
+    function filterNote(r) {
+      return r.filteredOut ? ` (${r.filteredOut} outside FF range skipped)` : '';
+    }
 
     function finish(result) {
       lastResult = result;
@@ -597,25 +695,28 @@ console.log('[Torn Mugger Log] sortable table script loaded,', document.querySel
 
     htmlBtn.addEventListener('click', () => {
       if (!lastResult) return;
-      downloadSortableTable(lastResult.events, lastResult.anonymous);
-      status.textContent = 'torn-muggers.html downloaded — open it from your Downloads folder.';
+      const r = exportResult();
+      downloadSortableTable(r.events, r.anonymous);
+      status.textContent = `torn-muggers.html downloaded${filterNote(r)} — open it from your Downloads folder.`;
     });
 
     yataBtn.addEventListener('click', () => {
       if (!lastResult) return;
-      downloadYataJSON(lastResult.named);
-      status.textContent = 'yata_import.json downloaded.';
+      const r = exportResult();
+      downloadYataJSON(r.named);
+      status.textContent = `yata_import.json downloaded${filterNote(r)}.`;
     });
 
     jsonBtn.addEventListener('click', () => {
       if (!lastResult) return;
-      const text = JSON.stringify(lastResult, null, 2);
+      const r = exportResult();
+      const text = JSON.stringify(r, null, 2);
       if (typeof GM_setClipboard === 'function') {
         GM_setClipboard(text);
       } else {
         navigator.clipboard.writeText(text);
       }
-      status.textContent = 'JSON copied to clipboard';
+      status.textContent = `JSON copied to clipboard${filterNote(r)}`;
     });
 
     ffsFetchBtn.addEventListener('click', async () => {
